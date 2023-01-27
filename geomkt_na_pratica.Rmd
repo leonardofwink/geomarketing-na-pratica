@@ -1,0 +1,587 @@
+---
+title: "Geomarketing na prática"
+author: "Leonardo Fernandes Wink"
+email: "leonardofwink@gmail.com"
+date: "`r format(Sys.time(), '%d/%m/%Y')`"
+output:
+  bookdown::html_document2:
+    theme: flatly
+    highlight: haddock
+    keep_md: yes
+    number_sections: yes
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+    fig_caption: yes
+    code_download: false
+    code_folding: show
+  word_document: 
+    toc: yes
+    keep_md: yes
+  pdf_document:
+    toc: yes
+  github_document:
+    html_preview: true
+always_allow_html: yes
+editor_options: 
+  chunk_output_type: console
+fig.align: center
+---
+
+```{r pré-config, echo = FALSE}
+R_LIBS_SITE = "E:\\Documents\\R\\R-4.2.2\\library"
+pacman::p_load(bookdown)
+```
+
+```{r configurando exibir/ocultar código e resultados, include=FALSE}
+hooks = knitr::knit_hooks$get()
+
+hook_foldable = function(type) {
+  force(type)
+  function(x, options) {
+    res = hooks[[type]](x, options)
+    
+    if (isFALSE(options[[paste0("fold.", type)]])) return(res)
+    
+    paste0(
+      "<details><summary>", type, "</summary>\n\n",
+      res,
+      "\n\n</details>"
+    )
+  }
+}
+
+knitr::knit_hooks$set(
+  Output = hook_foldable("output"),
+  Plot = hook_foldable("plot")
+)
+```
+
+# Introdução {#sec-introdução}
+
+Este projeto é inspirado na live intitulada "Geomarketing na prática" feita por [Daniel Andrade](https://www.linkedin.com/in/dan-andrade/) no dia 25/01/2023.
+
+Os dados fictícios foram fornecidos durante a live. É um estudo que busca identificar onde estão localizados os potenciais clientes de uma pizzaria no município do Rio de Janeiro.
+
+Alguns desafios são apresentados durante o desenvolvimento do estudo, como trabalhar com diferentes formatos de arquivos. Aqui utilizei as extensões `.csv`, `.gpkg`, `.shp` e `.kml`.
+
+Além disso, esse projeto é uma maneira de me desafiar. Enquanto o Daniel desenvolveu a análise utilizando o `QGIS`, eu busquei adaptar a mesma lógica dele, mas utilizando o `R`. Também procurei otimizar algumas etapas, principalmente no tratamento das planilhas.
+
+Você pode optar por exibir ou ocultar todos os códigos utilizados através do menu superior `Code`.
+
+# Pacotes necessários para a análise {#sec-pacotes-necessários-para-a-análise}
+
+## Pacotes para ETL-Dataviz {#sec-pacotes-para-etl-dataviz}
+
+```{r Pacotes necessários, message = FALSE, warning = TRUE}
+pacman::p_load(
+  # ETL (extract, transform, load)
+  janitor, readr, readxl, lubridate,
+  dplyr, 
+  tidyverse, 
+  glue,
+  skimr,
+  # Visualização
+  ggplot2,
+  rmarkdown, 
+  knitr,
+  kableExtra,
+  ggthemes,
+  ggtext
+)
+```
+
+## Pacotes Geoespaciais {#sec-pacotes-geoespaciais}
+
+```{r pacotes-geoespaciais, message = TRUE, warning = FALSE}
+pacman::p_load(
+  sf, raster, 
+  leaflet, leaflet.extras,
+  rgdal, rgeos,
+  maps,
+  mapview,
+  ggmap
+)
+```
+
+# *Extract, Transform, Load (ETL)* {#sec-extract-transform-load}
+
+## Arquivos {#sec-arquivos}
+
+No `code chunk` abaixo estou realizando a seguinte sequência de passos (*pipeline*):
+
+1.  Importo o arquivo `.csv`.
+
+2.  Coloco o nome das colunas em letras minúsculas e sem espaço/caracteres especiais para facilitar a manipulação.
+
+3.  Gero duas novas colunas:
+
+    1.  A coluna `endereco_completo` será usada para a [geocodificação](#sec-geocodificação).
+
+    2.  A coluna `Name` será usada para unificar os dados (`inner_join()`) já geocodificados com as demais informações de endereço.
+
+4.  Reordeno as colunas, para facilitar a visualização
+
+5.  E, por fim, altero o formato da coluna para `tibble`, para ser melhor utilizada no `R`.
+
+```{r importando arquivos, }
+clientes_pizzaria <- read.csv(
+  "E:/Desktop/Banco de dados - Super Live/Clientes _Pizzaria_RJ.csv", 
+  header = TRUE,
+  sep = ";",
+) %>% 
+  janitor::clean_names() %>% 
+  mutate(
+   endereco_completo = paste0(endereco, ", ", numero, ", ", bairro, "-", cidade),
+   Name = endereco,
+  ) %>% 
+  rename(
+    id_cliente = cliente                   ,
+  ) %>%
+  dplyr::select(
+    c(1:3),
+    Name,
+    endereco_completo,
+    everything()
+  ) %>% 
+  as_tibble()
+```
+
+No `code chunk` abaixo importo o arquivo em formato `.gpkg` da pizzaria. Além disso, transformo para o SRC `SIRGAS2000`.
+
+```{r importando_pizzaria_analise, error = FALSE, comment = FALSE, warning = FALSE, message = FALSE, cache.comments = FALSE, echo=TRUE}
+pizzaria_RJ <- st_read(
+  "E:/Desktop/Banco de dados - Super Live/Pizzaria.gpkg"
+) %>% 
+  st_transform(crs = 4674) #4326 = WGS84, 4674 = SIRGAS2000
+```
+
+```{r, error = FALSE, comment = FALSE, warning = FALSE, message = FALSE, cache.comments = FALSE, echo=FALSE}
+# st_crs(clientes_coords_attr)
+# st_crs(pizzaria_RJ) #pra descobrir qual o SRC
+```
+
+## Importando malha municipal do IBGE {#sec-importando-malha-municipal-do-ibge}
+
+Após fazer o *download* dos dados do site do IBGE[^1]
+
+[^1]: [Malha municipal - RJ - IBGE](#link-malha-municipal-ibge)
+
+```{r limite_municipal_RJ}
+lim_mun_RJ <- shapefile(
+  "E:/Desktop/Banco de dados - Super Live/RJ_Municipios_2021.shp"
+) %>% 
+  as("sf") 
+
+lim_mun_RJ %>% 
+  head(5)
+```
+
+# Análise exploratória de dados (EDA) {#sec-análise-exploratória-de-dados}
+
+Nesta etapa verifico a estrutura do dado: como estão ordenadas as colunas, qual o conteúdo delas, o número de observações totais (ou `n`) e se temos valores não medidos/faltantes (`NA`).
+
+Abaixo, temos a visualização da planilha `clientes_pizzaria`.
+
+```{r Visualização da planilha importada, echo = FALSE}
+paged_table(clientes_pizzaria,
+            options = list(rows.print = 20,
+                           cols.print = 10))
+```
+
+Encontramos que temos `r dim(clientes_pizzaria)[1]` linhas e `r dim(clientes_pizzaria)[2]` colunas.
+
+```{r estrutura da planilha, echo=TRUE, eval=FALSE}
+clientes_pizzaria %>% 
+  str()
+```
+
+```{r echo=FALSE, eval=TRUE}
+clientes_pizzaria %>% 
+  str() %>% 
+  kbl() %>% 
+  kable_styling(
+    bootstrap_options = c(
+      "striped",
+      "hover",
+      "responsive"
+    )
+  )
+```
+
+```{r}
+clientes_pizzaria %>% 
+  skim() 
+```
+
+------------------------------------------------------------------------
+
+No `code chunk` abaixo, armazeno as informações da função `skim()` em formato `tibble` na variável `eda`, para a manipulação de dados dentro do `R`. Na sequência, identificamos as colunas geradas a partir da função `skim()`.
+
+```{r echo=TRUE}
+eda <- clientes_pizzaria %>% 
+  skim() %>% 
+  as_tibble()
+```
+
+```{r echo=TRUE, results='hide'}
+eda %>% 
+  names()
+```
+
+```{r echo = FALSE}
+eda %>% 
+  names() %>% 
+  as_tibble() %>% 
+  kbl() %>% 
+  kable_styling(
+    bootstrap_options = c(
+      "striped",
+      "hover",
+      "responsive"
+    )
+  )
+```
+
+Existem `r eda %>% count(skim_type) %>% .[[1,2]]` colunas do tipo `r eda %>% count(skim_type) %>% .[[1,1]]` e `r eda %>% count(skim_type) %>% .[[2,2]]` colunas do tipo `r eda %>% count(skim_type) %>% .[[2,1]]`.
+
+```{r}
+eda %>% 
+  count(skim_type)
+```
+
+No `code chunk` abaixo identificamos há diferença no número de `endereços` e `endereços completos`, ou seja, temos valores repetidos na coluna `endereco`. Isso aponta para o fato de termos múltiplos clientes na mesma rua.
+
+```{r}
+eda %>% 
+  dplyr::select(
+    skim_variable,
+    character.n_unique
+  )
+```
+
+### Número de NAs
+
+Há `r eda %>% dplyr::select(n_missing) %>% sum()` valores faltantes.
+
+```{r}
+eda %>% 
+  dplyr::select(n_missing) %>% 
+  sum()
+```
+
+### Quais bairros possuem mais clientes
+
+```{r bairros mais recorrentes, echo = TRUE}
+eda_rua <- clientes_pizzaria %>% 
+  distinct(
+    endereco_completo,
+    .keep_all = TRUE
+  ) %>%
+  dplyr::select(
+    endereco, numero, endereco_completo, bairro,
+  ) %>% 
+  group_by(endereco) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  arrange(
+    desc(n),
+    desc(bairro),
+    desc(endereco),
+    numero
+    ) %>% 
+  dplyr::select(
+    # -endereco, 
+    -numero,
+  )
+```
+
+```{r tabela bairros mais recorrentes, echo = FALSE}
+eda_rua %>% 
+  head(10) %>% 
+  kbl() %>% 
+  kable_styling(
+    bootstrap_options = c(
+      "striped",
+      "hover",
+      "responsive"
+    )
+  )
+```
+
+No `code chunk` acima identificamos onde há mais clientes no mesmo bairro. Através da variável `eda_rua` percebemos que algumas ruas se repetem. A `r eda_rua[ ,c(1, 3, 4)] %>% distinct(endereco, .keep_all = TRUE) %>% filter(n == max(n)) %>% pull(1)`, do bairro `r eda_rua[ ,c(1, 3, 4)] %>% distinct(endereco, .keep_all = TRUE) %>% filter(n == max(n)) %>% pull(2)`, é a que possui maior número de observações, com `n` total igual a `r eda_rua[ ,c(1, 3, 4)] %>% distinct(endereco, .keep_all = TRUE) %>% filter(n == max(n)) %>% pull(3)`.
+
+# Geração de mapas {#sec-geração-de-mapas}
+
+## Mapa municípios - Rio de Janeiro {#sec-mapa-municípios---rio-de-janeiro}
+
+```{r mapa-estatico, fig.cap = "Mapa estático dos municípios do Rio de Janeiro", eval=TRUE, warning=FALSE}
+Brasil <- getData(
+  "GADM",
+  country = "Brazil",
+  level = 3
+) %>%
+  st_as_sf()
+
+RJ <- subset(Brasil,
+             NAME_1 == "Rio de Janeiro")
+
+# Definindo o SRC
+RJ <- RJ %>%
+  st_transform(crs = 4674) #4326 = WGS84, 4674 = SIRGAS2000
+
+clientes_pizzaria %>%
+  ggplot()+
+  geom_sf(
+    data = RJ
+  )+
+  labs(
+    title = "Municípios - RJ",
+    x = "Longitude",
+    y = "Latitude",
+    caption = "Elaborado por: Leonardo Fernandes Wink\n26/01/2023"
+  )+ 
+  theme_bw()+
+  theme(
+    plot.title = element_text(
+        size = 16,
+        hjust = 0.5,
+        color = "black",
+        face = "bold"
+      ),
+  )
+
+```
+
+## Geocodificação {#sec-geocodificação}
+
+-   Para essa etapa é necessário que se importe o arquivo para o `Google Earth Pro` e salve em `.kml`.
+-   Nesse `code chunk` são gerados os campos de `lat` e `long`.
+
+```{r pegando latlong}
+clientes_coords_attr <- read_sf(
+  "E:/Desktop/Banco de dados - Super Live/Clientes _Pizzaria_RJ.kml"
+) %>% 
+  st_zm(
+    drop = TRUE,
+    what = "ZM"
+  ) 
+```
+
+```{r ajuste-SRC, include=FALSE, eval=FALSE}
+# utilizar quando os dados estão dentro de list()
+# clientes_coords_attr <- clientes_coords_attr %>%
+#   mutate(
+#     long = 
+#       unlist(map(
+#         clientes_coords_attr$geometry,1
+#       )),
+#     lat = 
+#       unlist(map(
+#         clientes_coords_attr$geometry,2
+#       ))
+#   ) %>%
+#   st_sfc(crs = 4326)
+```
+
+```{r ajustando SRC}
+clientes_coords_attr <- clientes_coords_attr %>% 
+  dplyr::mutate(long = sf::st_coordinates(.)[,1],
+                lat = sf::st_coordinates(.)[,2]) %>% 
+  st_transform(crs = 4674) #4326 = WGS84, 4674 = SIRGAS2000
+```
+
+```{r inner_join}
+clientes_pizzaria_join <- inner_join(
+  x = clientes_pizzaria, 
+  y = clientes_coords_attr,
+  by = "Name"
+  )
+```
+
+# Mapa interativo {#sec-mapa-interativo}
+
+Nesta seção geramos os mapas interativos. Você pode dar *zoom*, arrastar para os lados e clicar nos pontos para saber mais informações a respeito.
+
+## Mapa de localização dos clientes da pizzaria {#sec-mapa-de-localização-dos-clientes-da-pizzaria}
+
+Gerando o mapa que será base para os demais.
+
+-   Especificando o zoom inicial;
+
+-   Adicionando a quadrícula dos graus (intervalo de 5º em 5º);
+
+-   Definindo o provedor do mapa-base;
+
+    -   Se é imagem de satélite (ESRI) ou
+
+    -   *Software* livre, o *Open Street Map* (OSM)
+
+-   Adicionando o limite dos municípios do estado do Rio de Janeiro;
+
+-   Adicionando a barra de escala no canto inferior direito.
+
+```{r mapa_interativo, fig.cap = "Mapa interativo", message = FALSE, warning = FALSE, eval = TRUE}
+mapa_interativo <- clientes_pizzaria_join %>% 
+  leaflet() %>% 
+  setView(
+    lat = -23,
+    lng = -43.2,
+    zoom = 8
+  ) %>% 
+  addSimpleGraticule(
+    interval = 5,
+    showOriginLabel = FALSE,
+  ) %>% 
+   addProviderTiles(
+    # "Esri.WorldImagery" #Imagem de satélite
+    "OpenStreetMap.Mapnik" #OpenStreetMap -> Software livre
+  ) %>% 
+  addPolygons(
+    data = lim_mun_RJ,
+    color = "red",
+    fill = FALSE,
+    weight = 2.5,
+    opacity = 1,
+  ) %>% 
+  addScaleBar(
+    # map,
+    position = "bottomright",
+    options = scaleBarOptions(
+      maxWidth = 150,
+      metric = TRUE,
+      imperial = FALSE,
+      updateWhenIdle = TRUE
+    )
+  )
+```
+
+## Área de influência 1-3km {#sec-área-de-influência-1-3km}
+
+A partir das áreas de influência, depreende-se a área em que devem ser direcionadas campanhas de marketing, conforme a figura \@ref(fig:mapa-area-influencia).
+
+```{r mapa-area-influencia, fig.cap = "Mapa de área de influência", message = FALSE, warning = FALSE, eval = TRUE}
+mapa_interativo %>%
+  addCircles(
+    data = pizzaria_RJ,
+    radius = 3000,
+    fillOpacity = 0.1,
+    color = "green",
+    popup = ~paste0(
+      "<b>Endereço: </b>", "Rua João Paulo I", ", ", "s/n", "<br>",
+      "<b>Bairro: </b>", "Estácio", "<br>",
+      "<b>Município: </b>", "Rio de Janeiro", "<br>",
+      "<b>CEP: </b>", "-", "<br>",
+      "<b>Área de Influência: </b>", "3km",
+      sep = " "
+    )
+  ) %>% 
+  addCircles(
+    data = pizzaria_RJ,
+    radius = 1000,
+    fillOpacity = 0.3,
+    color = "green",
+    popup = ~paste0(
+      "<b>Endereço: </b>", "Rua João Paulo I", ", ", "s/n", "<br>",
+      "<b>Bairro: </b>", "Estácio", "<br>",
+      "<b>Município: </b>", "Rio de Janeiro", "<br>",
+      "<b>CEP: </b>", "-", "<br>",
+      "<b>Área de Influência: </b>", "1km",
+      sep = " "
+    )
+  ) %>% 
+  addCircleMarkers(
+    data = clientes_pizzaria_join,
+    lng = ~long,
+    lat = ~lat,
+    radius = 5,
+    fillOpacity = 0.6,
+    color = "orange",
+    popup = ~paste0(
+      "<b>Endereço: </b>", {endereco}, ", ", numero, "<br>",
+      "<b>Bairro: </b>", bairro, "<br>",
+      "<b>Município: </b>", cidade, "<br>",
+      "<b>CEP: </b>", cep, "<br>",
+      sep = " "
+    )
+  ) %>% 
+  addCircleMarkers(
+    data = pizzaria_RJ,
+    radius = 8,
+    fillOpacity = 1,
+    color = "green",
+    popup = ~paste0(
+      "<b>Endereço: </b>", "Rua João Paulo I", ", ", "s/n", "<br>",
+      "<b>Bairro: </b>", "Estácio", "<br>",
+      "<b>Município: </b>", "Rio de Janeiro", "<br>",
+      "<b>CEP: </b>", "-", "<br>",
+      sep = " "
+    )
+  )
+```
+
+```{r map_view, echo = FALSE, eval = FALSE}
+clientes_coords_attr %>% 
+  mapview()
+```
+
+## Mapa de calor {#sec-mapa-de-calor}
+
+Na figura \@ref(fig:heat-map), temos o mapa de calor, indicando onde está a maior densidade de clientes espacialmente.
+
+```{r heat-map, fig.cap = "Mapa de calor", message = FALSE, warning = FALSE, eval = TRUE}
+mapa_interativo %>% 
+  addCircleMarkers(
+    data = clientes_pizzaria_join,
+    lng = ~long,
+    lat = ~lat,
+    radius = 5,
+    fillOpacity = 0.6,
+    color = "orange",
+    popup = ~paste0(
+      "<b>Endereço: </b>", {endereco}, ", ", numero, "<br>",
+      "<b>Bairro: </b>", bairro, "<br>",
+      "<b>Município: </b>", cidade, "<br>",
+      "<b>CEP: </b>", cep, "<br>",
+      sep = " "
+    )
+  ) %>% 
+  addCircleMarkers(
+    data = pizzaria_RJ,
+    radius = 8,
+    fillOpacity = 1,
+    color = "green",
+    popup = ~paste0(
+      "<b>Endereço: </b>", "Rua João Paulo I", ", ", "s/n", "<br>",
+      "<b>Bairro: </b>", "Estácio", "<br>",
+      "<b>Município: </b>", "Rio de Janeiro", "<br>",
+      "<b>CEP: </b>", "-", "<br>",
+      sep = " "
+    )
+  ) %>% 
+  addHeatmap(
+    data = clientes_coords_attr,
+    # max = 0.01,
+    blur = 100,
+    radius = 50, #isso aqui na vdd é diametro
+    # gradient = "magma"
+  ) 
+```
+
+# Dados {#sec-dados}
+
+1.  [Código para esse documento](https://rpubs.com/leonardofwink/geomarketing-na-pratica)
+2.  [Malha municipal - RJ - IBGE](https://www.ibge.gov.br/geociencias/organizacao-do-territorio/malhas-territoriais/15774-malhas.html?=&t=acesso-ao-produto){#link-malha-municipal-ibge}
+
+# Informações adicionais {#sec-informações-adicionais .unnumbered}
+
+E-mail para contato: [leonardofwink\@gmail.com](leonardofwink@gmail.com)
+
+GitHub: <https://github.com/leonardofwink/>
+
+LinkedIn: <https://www.linkedin.com/in/leonardofwink/>
+
+# Citação {#sec-citação .unnumbered}
+
+WINK, Leonardo Fernandes. **Geomarketing na prática**. Rpubs.Porto Alegre - RS, 26 jan. 2023. Disponível em: <https://rpubs.com/leonardofwink/geomarketing-na-pratica.>
