@@ -60,7 +60,7 @@ knitr::knit_hooks$set(
 
 # Introdução {#sec-introdução}
 
-Este projeto é inspirado na live intitulada "Geomarketing na prática" feita por [Daniel Andrade](https://www.linkedin.com/in/dan-andrade/) no dia 25/01/2023.
+Este projeto é inspirado na live intitulada "Geomarketing na prática" feita por [Daniel Andrade](https://www.linkedin.com/in/dan-andrade/) no dia 24/01/2023.
 
 Os dados fictícios foram fornecidos durante a live. É um estudo que busca identificar onde estão localizados os potenciais clientes de uma pizzaria no município do Rio de Janeiro.
 
